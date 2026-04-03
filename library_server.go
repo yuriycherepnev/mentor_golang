@@ -1,47 +1,443 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 )
 
-type Book struct {
-	ID        int       `json:"id"`
-	Title     string    `json:"title"`
-	Author    Author    `json:"author"`
-	Year      int       `json:"year"`
-	CreatedAt time.Time `json:"created_at"`
-}
+// ========== МОДЕЛИ ==========
 
 type Author struct {
 	ID   int    `json:"id"`
-	Name string `json:"title"`
+	Name string `json:"name"`
 }
 
-type Library struct {
-	mu     sync.RWMutex
-	books  map[int]Book
-	nextID int
+type Reader struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
 }
 
-// NewLibrary - создает новое хранилище
-func NewLibrary() *Library {
-	return &Library{
-		books:  make(map[int]Book),
-		nextID: 1,
+type Book struct {
+	ID       int     `json:"id"`
+	Title    *string `json:"title,omitempty"` // может быть NULL
+	IDAuthor *int    `json:"id_author,omitempty"`
+	IDReader *int    `json:"id_reader,omitempty"`
+	Author   *Author `json:"author,omitempty"` // для JOIN
+	Reader   *Reader `json:"reader,omitempty"` // для JOIN
+}
+
+// ========== ХРАНИЛИЩЕ ==========
+
+type Storage struct {
+	db *sql.DB
+}
+
+func NewStorage(db *sql.DB) *Storage {
+	return &Storage{db: db}
+}
+
+// ---------- AUTHORS ----------
+
+func (s *Storage) CreateAuthor(name string) (*Author, error) {
+	result, err := s.db.Exec("INSERT INTO author(name) VALUES(?)", name)
+	if err != nil {
+		return nil, err
 	}
+	id, _ := result.LastInsertId()
+	return &Author{ID: int(id), Name: name}, nil
 }
 
-// Server - HTTP сервер
+func (s *Storage) GetAuthors() ([]Author, error) {
+	rows, err := s.db.Query("SELECT id, name FROM author ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var authors []Author
+	for rows.Next() {
+		var a Author
+		if err := rows.Scan(&a.ID, &a.Name); err != nil {
+			return nil, err
+		}
+		authors = append(authors, a)
+	}
+	return authors, nil
+}
+
+func (s *Storage) GetAuthorByID(id int) (*Author, error) {
+	var a Author
+	err := s.db.QueryRow("SELECT id, name FROM author WHERE id = ?", id).Scan(&a.ID, &a.Name)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func (s *Storage) UpdateAuthor(id int, name string) error {
+	result, err := s.db.Exec("UPDATE author SET name = ? WHERE id = ?", name, id)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Storage) DeleteAuthor(id int) error {
+	var count int
+	s.db.QueryRow("SELECT COUNT(*) FROM book WHERE id_author = ?", id).Scan(&count)
+	if count > 0 {
+		return &ForeignKeyError{"author has books"}
+	}
+
+	result, err := s.db.Exec("DELETE FROM author WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ---------- READERS ----------
+func (s *Storage) CreateReader(name string) (*Reader, error) {
+	result, err := s.db.Exec("INSERT INTO reader(name) VALUES(?)", name)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := result.LastInsertId()
+	return &Reader{ID: int(id), Name: name}, nil
+}
+
+func (s *Storage) GetReaders() ([]Reader, error) {
+	rows, err := s.db.Query("SELECT id, name FROM reader ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var readers []Reader
+	for rows.Next() {
+		var r Reader
+		if err := rows.Scan(&r.ID, &r.Name); err != nil {
+			return nil, err
+		}
+		readers = append(readers, r)
+	}
+	return readers, nil
+}
+
+func (s *Storage) GetReaderByID(id int) (*Reader, error) {
+	var r Reader
+	err := s.db.QueryRow("SELECT id, name FROM reader WHERE id = ?", id).Scan(&r.ID, &r.Name)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *Storage) UpdateReader(id int, name string) error {
+	result, err := s.db.Exec("UPDATE reader SET name = ? WHERE id = ?", name, id)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Storage) DeleteReader(id int) error {
+	var count int
+	s.db.QueryRow("SELECT COUNT(*) FROM book WHERE id_reader = ?", id).Scan(&count)
+	if count > 0 {
+		return &ForeignKeyError{"reader has books"}
+	}
+
+	result, err := s.db.Exec("DELETE FROM reader WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ---------- BOOKS ----------
+func (s *Storage) CreateBook(uniqueID string, title *string, idAuthor *int) (*Book, error) {
+	result, err := s.db.Exec(
+		"INSERT INTO book(unique_id, title, id_author, id_reader) VALUES(?, ?, ?, NULL)",
+		uniqueID, title, idAuthor,
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := result.LastInsertId()
+	return s.GetBookByID(int(id))
+}
+
+func (s *Storage) GetBooks() ([]Book, error) {
+	query := `
+        SELECT b.id, b.unique_id, b.title, b.id_author, b.id_reader,
+               a.id, a.name,
+               r.id, r.name
+        FROM book b
+        LEFT JOIN author a ON b.id_author = a.id
+        LEFT JOIN reader r ON b.id_reader = r.id
+        ORDER BY b.id
+    `
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var books []Book
+	for rows.Next() {
+		var b Book
+		var aID, _ sql.NullInt64
+		var aNameStr sql.NullString
+		var rID, _ sql.NullInt64
+		var rNameStr sql.NullString
+
+		err := rows.Scan(
+			&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
+			&aID, &aNameStr,
+			&rID, &rNameStr,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if aID.Valid {
+			b.Author = &Author{ID: int(aID.Int64), Name: aNameStr.String}
+		}
+
+		if rID.Valid {
+			b.Reader = &Reader{ID: int(rID.Int64), Name: rNameStr.String}
+		}
+
+		books = append(books, b)
+	}
+	return books, nil
+}
+
+func (s *Storage) GetBookByID(id int) (*Book, error) {
+	query := `
+        SELECT b.id, b.unique_id, b.title, b.id_author, b.id_reader,
+               a.id, a.name,
+               r.id, r.name
+        FROM book b
+        LEFT JOIN author a ON b.id_author = a.id
+        LEFT JOIN reader r ON b.id_reader = r.id
+        WHERE b.id = ?
+    `
+	var b Book
+	var aID, _ sql.NullInt64
+	var aNameStr sql.NullString
+	var rID, _ sql.NullInt64
+	var rNameStr sql.NullString
+
+	err := s.db.QueryRow(query, id).Scan(
+		&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
+		&aID, &aNameStr,
+		&rID, &rNameStr,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if aID.Valid {
+		b.Author = &Author{ID: int(aID.Int64), Name: aNameStr.String}
+	}
+	if rID.Valid {
+		b.Reader = &Reader{ID: int(rID.Int64), Name: rNameStr.String}
+	}
+
+	return &b, nil
+}
+
+func (s *Storage) GetBookByUniqueID(uniqueID string) (*Book, error) {
+	query := `
+        SELECT b.id, b.unique_id, b.title, b.id_author, b.id_reader,
+               a.id, a.name,
+               r.id, r.name
+        FROM book b
+        LEFT JOIN author a ON b.id_author = a.id
+        LEFT JOIN reader r ON b.id_reader = r.id
+        WHERE b.unique_id = ?
+    `
+	var b Book
+	var aID, _ sql.NullInt64
+	var aNameStr sql.NullString
+	var rID, _ sql.NullInt64
+	var rNameStr sql.NullString
+
+	err := s.db.QueryRow(query, uniqueID).Scan(
+		&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
+		&aID, &aNameStr,
+		&rID, &rNameStr,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if aID.Valid {
+		b.Author = &Author{ID: int(aID.Int64), Name: aNameStr.String}
+	}
+	if rID.Valid {
+		b.Reader = &Reader{ID: int(rID.Int64), Name: rNameStr.String}
+	}
+
+	return &b, nil
+}
+
+func (s *Storage) UpdateBook(id int, title *string, idAuthor *int) error {
+	var query string
+	var args []interface{}
+
+	if title != nil && idAuthor != nil {
+		query = "UPDATE book SET title = ?, id_author = ? WHERE id = ?"
+		args = []interface{}{title, idAuthor, id}
+	} else if title != nil {
+		query = "UPDATE book SET title = ? WHERE id = ?"
+		args = []interface{}{title, id}
+	} else if idAuthor != nil {
+		query = "UPDATE book SET id_author = ? WHERE id = ?"
+		args = []interface{}{idAuthor, id}
+	} else {
+		return nil
+	}
+
+	result, err := s.db.Exec(query, args...)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Storage) DeleteBook(id int) error {
+	result, err := s.db.Exec("DELETE FROM book WHERE id = ?", id)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ---------- БИЗНЕС-ОПЕРАЦИИ ----------
+func (s *Storage) BorrowBook(bookID int, readerID int) error {
+	var readerExists bool
+	s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM reader WHERE id = ?)", readerID).Scan(&readerExists)
+	if !readerExists {
+		return &ForeignKeyError{"reader not found"}
+	}
+
+	var currentReader sql.NullInt64
+	err := s.db.QueryRow("SELECT id_reader FROM book WHERE id = ?", bookID).Scan(&currentReader)
+	if err == sql.ErrNoRows {
+		return &ForeignKeyError{"book not found"}
+	}
+	if err != nil {
+		return err
+	}
+
+	if currentReader.Valid {
+		return &BusinessError{"book already borrowed"}
+	}
+
+	result, err := s.db.Exec("UPDATE book SET id_reader = ? WHERE id = ?", readerID, bookID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Storage) ReturnBook(bookID int) error {
+	var currentReader sql.NullInt64
+	err := s.db.QueryRow("SELECT id_reader FROM book WHERE id = ?", bookID).Scan(&currentReader)
+	if err == sql.ErrNoRows {
+		return &ForeignKeyError{"book not found"}
+	}
+	if err != nil {
+		return err
+	}
+
+	if !currentReader.Valid {
+		return &BusinessError{"book is not borrowed"}
+	}
+
+	result, err := s.db.Exec("UPDATE book SET id_reader = NULL WHERE id = ?", bookID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+// ========== ОШИБКИ ==========
+
+type ForeignKeyError struct {
+	Message string
+}
+
+func (e *ForeignKeyError) Error() string {
+	return e.Message
+}
+
+type BusinessError struct {
+	Message string
+}
+
+func (e *BusinessError) Error() string {
+	return e.Message
+}
+
+// ========== HTTP СЕРВЕР ==========
+
 type Server struct {
-	library *Library
+	storage *Storage
 }
 
-// Response - стандартный ответ
 type Response struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
@@ -49,158 +445,425 @@ type Response struct {
 }
 
 func main() {
-	library := NewLibrary()
-	server := &Server{library: library}
+	// Подключение к MySQL
+	db, err := sql.Open("mysql", "root:password@tcp(localhost:3306)/library?parseTime=true")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
 
-	// Регистрация роутов
+	if err := db.Ping(); err != nil {
+		log.Fatal(err)
+	}
+
+	storage := NewStorage(db)
+	server := &Server{storage: storage}
+
+	// authors
+	http.HandleFunc("GET /authors", server.GetAuthors)
+	http.HandleFunc("POST /authors", server.CreateAuthor)
+	http.HandleFunc("GET /authors/{id}", server.GetAuthorByID)
+	http.HandleFunc("PUT /authors/{id}", server.UpdateAuthor)
+	http.HandleFunc("DELETE /authors/{id}", server.DeleteAuthor)
+
+	// readers
+	http.HandleFunc("GET /readers", server.GetReaders)
+	http.HandleFunc("POST /readers", server.CreateReader)
+	http.HandleFunc("GET /readers/{id}", server.GetReaderByID)
+	http.HandleFunc("PUT /readers/{id}", server.UpdateReader)
+	http.HandleFunc("DELETE /readers/{id}", server.DeleteReader)
+
+	// books
 	http.HandleFunc("GET /books", server.GetBooks)
-	http.HandleFunc("GET /books/{id}", server.GetBookByID)
 	http.HandleFunc("POST /books", server.CreateBook)
+	http.HandleFunc("GET /books/{id}", server.GetBookByID)
 	http.HandleFunc("PUT /books/{id}", server.UpdateBook)
 	http.HandleFunc("DELETE /books/{id}", server.DeleteBook)
 
-	// Запуск сервера
-	println("Server starting on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		panic(err)
-	}
+	// functions
+	http.HandleFunc("POST /books/{id}/borrow", server.BorrowBook)
+	http.HandleFunc("POST /books/{id}/return", server.ReturnBook)
+
+	log.Println("Server starting on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
-// GetBooks - получение всех книг
+// ========== ХЕНДЛЕРЫ АВТОРОВ ==========
+
+func (s *Server) GetAuthors(w http.ResponseWriter, r *http.Request) {
+	authors, err := s.storage.GetAuthors()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: authors})
+}
+
+func (s *Server) CreateAuthor(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	author, err := s.storage.CreateAuthor(req.Name)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusCreated, Response{Success: true, Data: author})
+}
+
+func (s *Server) GetAuthorByID(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	author, err := s.storage.GetAuthorByID(id)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if author == nil {
+		s.writeError(w, http.StatusNotFound, "Author not found")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: author})
+}
+
+func (s *Server) UpdateAuthor(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	if err := s.storage.UpdateAuthor(id, req.Name); err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(w, http.StatusNotFound, "Author not found")
+		} else {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "updated"}})
+}
+
+func (s *Server) DeleteAuthor(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	if err := s.storage.DeleteAuthor(id); err != nil {
+		var e *ForeignKeyError
+		switch {
+		case errors.As(err, &e):
+			s.writeError(w, http.StatusConflict, e.Message)
+		default:
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
+}
+
+// ========== ХЕНДЛЕРЫ ЧИТАТЕЛЕЙ ==========
+
+func (s *Server) GetReaders(w http.ResponseWriter, r *http.Request) {
+	readers, err := s.storage.GetReaders()
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: readers})
+}
+
+func (s *Server) CreateReader(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	reader, err := s.storage.CreateReader(req.Name)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusCreated, Response{Success: true, Data: reader})
+}
+
+func (s *Server) GetReaderByID(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	reader, err := s.storage.GetReaderByID(id)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if reader == nil {
+		s.writeError(w, http.StatusNotFound, "Reader not found")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: reader})
+}
+
+func (s *Server) UpdateReader(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.Name == "" {
+		s.writeError(w, http.StatusBadRequest, "Name is required")
+		return
+	}
+
+	if err := s.storage.UpdateReader(id, req.Name); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			s.writeError(w, http.StatusNotFound, "Reader not found")
+		} else {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "updated"}})
+}
+
+func (s *Server) DeleteReader(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	if err := s.storage.DeleteReader(id); err != nil {
+		var e *ForeignKeyError
+		switch {
+		case errors.As(err, &e):
+			s.writeError(w, http.StatusConflict, e.Message)
+		default:
+			if errors.Is(err, sql.ErrNoRows) {
+				s.writeError(w, http.StatusNotFound, "Reader not found")
+			} else {
+				s.writeError(w, http.StatusInternalServerError, err.Error())
+			}
+		}
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
+}
+
+// ========== ХЕНДЛЕРЫ КНИГ ==========
+
 func (s *Server) GetBooks(w http.ResponseWriter, r *http.Request) {
-	s.library.mu.RLock()
-	defer s.library.mu.RUnlock()
-
-	books := make([]Book, 0, len(s.library.books))
-	for _, book := range s.library.books {
-		books = append(books, book)
-	}
-
-	s.writeJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    books,
-	})
-}
-
-// GetBookByID - получение книги по ID
-func (s *Server) GetBookByID(w http.ResponseWriter, r *http.Request) {
-	id, err := s.extractID(r)
+	books, err := s.storage.GetBooks()
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid book ID")
+		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	s.library.mu.RLock()
-	defer s.library.mu.RUnlock()
-
-	book, exists := s.library.books[id]
-	if !exists {
-		s.writeError(w, http.StatusNotFound, "Book not found")
-		return
-	}
-
-	s.writeJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    book,
-	})
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: books})
 }
 
-// CreateBook - создание новой книги
 func (s *Server) CreateBook(w http.ResponseWriter, r *http.Request) {
-	var book Book
-	if err := json.NewDecoder(r.Body).Decode(&book); err != nil {
+	var req struct {
+		UniqueID string  `json:"unique_id"`
+		Title    *string `json:"title,omitempty"`
+		IDAuthor *int    `json:"id_author,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-
-	// Валидация
-	if book.Title == "" || book.Author == "" {
-		s.writeError(w, http.StatusBadRequest, "Title and author are required")
+	if req.UniqueID == "" {
+		s.writeError(w, http.StatusBadRequest, "unique_id is required")
 		return
 	}
 
-	s.library.mu.Lock()
-	defer s.library.mu.Unlock()
+	// Проверяем уникальность unique_id
+	existing, _ := s.storage.GetBookByUniqueID(req.UniqueID)
+	if existing != nil {
+		s.writeError(w, http.StatusConflict, "unique_id already exists")
+		return
+	}
 
-	book.ID = s.library.nextID
-	book.CreatedAt = time.Now()
-	s.library.books[book.ID] = book
-	s.library.nextID++
-
-	s.writeJSON(w, http.StatusCreated, Response{
-		Success: true,
-		Data:    book,
-	})
+	book, err := s.storage.CreateBook(req.UniqueID, req.Title, req.IDAuthor)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusCreated, Response{Success: true, Data: book})
 }
 
-// UpdateBook - обновление книги
+func (s *Server) GetBookByID(w http.ResponseWriter, r *http.Request) {
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	book, err := s.storage.GetBookByID(id)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if book == nil {
+		s.writeError(w, http.StatusNotFound, "Book not found")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
+}
+
 func (s *Server) UpdateBook(w http.ResponseWriter, r *http.Request) {
-	id, err := s.extractID(r)
+	id, err := extractID(r)
 	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid book ID")
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
 		return
 	}
 
-	var updates Book
-	if err := json.NewDecoder(r.Body).Decode(&updates); err != nil {
+	var req struct {
+		Title    *string `json:"title,omitempty"`
+		IDAuthor *int    `json:"id_author,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	s.library.mu.Lock()
-	defer s.library.mu.Unlock()
-
-	existing, exists := s.library.books[id]
-	if !exists {
-		s.writeError(w, http.StatusNotFound, "Book not found")
+	if err := s.storage.UpdateBook(id, req.Title, req.IDAuthor); err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(w, http.StatusNotFound, "Book not found")
+		} else {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 
-	// Обновляем только переданные поля
-	if updates.Title != "" {
-		existing.Title = updates.Title
-	}
-	if updates.Author != "" {
-		existing.Author = updates.Author
-	}
-	if updates.Year != 0 {
-		existing.Year = updates.Year
-	}
-
-	s.library.books[id] = existing
-
-	s.writeJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    existing,
-	})
+	book, _ := s.storage.GetBookByID(id)
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
 }
 
-// DeleteBook - удаление книги
 func (s *Server) DeleteBook(w http.ResponseWriter, r *http.Request) {
-	id, err := s.extractID(r)
+	id, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	if err := s.storage.DeleteBook(id); err != nil {
+		if err == sql.ErrNoRows {
+			s.writeError(w, http.StatusNotFound, "Book not found")
+		} else {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
+}
+
+// ========== БИЗНЕС-ОПЕРАЦИИ ==========
+
+func (s *Server) BorrowBook(w http.ResponseWriter, r *http.Request) {
+	bookID, err := extractID(r)
 	if err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid book ID")
 		return
 	}
 
-	s.library.mu.Lock()
-	defer s.library.mu.Unlock()
-
-	if _, exists := s.library.books[id]; !exists {
-		s.writeError(w, http.StatusNotFound, "Book not found")
+	var req struct {
+		ReaderID int `json:"reader_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	if req.ReaderID == 0 {
+		s.writeError(w, http.StatusBadRequest, "reader_id is required")
 		return
 	}
 
-	delete(s.library.books, id)
+	if err := s.storage.BorrowBook(bookID, req.ReaderID); err != nil {
+		switch e := err.(type) {
+		case *ForeignKeyError:
+			s.writeError(w, http.StatusNotFound, e.Message)
+		case *BusinessError:
+			s.writeError(w, http.StatusConflict, e.Message)
+		default:
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
 
-	s.writeJSON(w, http.StatusOK, Response{
-		Success: true,
-		Data:    map[string]string{"message": "Book deleted successfully"},
-	})
+	book, _ := s.storage.GetBookByID(bookID)
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
 }
 
-// extractID - извлекает ID из URL path
-func (s *Server) extractID(r *http.Request) (int, error) {
+func (s *Server) ReturnBook(w http.ResponseWriter, r *http.Request) {
+	bookID, err := extractID(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid book ID")
+		return
+	}
+
+	if err := s.storage.ReturnBook(bookID); err != nil {
+		switch e := err.(type) {
+		case *ForeignKeyError:
+			s.writeError(w, http.StatusNotFound, e.Message)
+		case *BusinessError:
+			s.writeError(w, http.StatusConflict, e.Message)
+		default:
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	book, _ := s.storage.GetBookByID(bookID)
+	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
+}
+
+// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+
+func extractID(r *http.Request) (int, error) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
 	parts := strings.Split(path, "/")
 	if len(parts) < 3 {
@@ -209,17 +872,12 @@ func (s *Server) extractID(r *http.Request) (int, error) {
 	return strconv.Atoi(parts[len(parts)-1])
 }
 
-// writeJSON - вспомогательная функция для отправки JSON
 func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
 }
 
-// writeError - вспомогательная функция для отправки ошибки
 func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
-	s.writeJSON(w, status, Response{
-		Success: false,
-		Error:   message,
-	})
+	s.writeJSON(w, status, Response{Success: false, Error: message})
 }
