@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	_ "github.com/go-sql-driver/mysql"
 	"log"
 	"net/http"
 	"strconv"
@@ -446,7 +447,7 @@ type Response struct {
 
 func main() {
 	// Подключение к MySQL
-	db, err := sql.Open("mysql", "root:password@tcp(localhost:3306)/library?parseTime=true")
+	db, err := sql.Open("mysql", "root:root@tcp(127.0.0.1:3307)/library?parseTime=true")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -484,8 +485,8 @@ func main() {
 	http.HandleFunc("POST /books/{id}/borrow", server.BorrowBook)
 	http.HandleFunc("POST /books/{id}/return", server.ReturnBook)
 
-	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Server starting on :8088")
+	log.Fatal(http.ListenAndServe(":8088", nil))
 }
 
 // ========== ХЕНДЛЕРЫ АВТОРОВ ==========
