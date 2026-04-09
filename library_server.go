@@ -114,6 +114,7 @@ func (s *Storage) DeleteAuthor(id int) error {
 }
 
 // ---------- READERS ----------
+
 func (s *Storage) CreateReader(name string) (*Reader, error) {
 	result, err := s.db.Exec("INSERT INTO reader(name) VALUES(?)", name)
 	if err != nil {
@@ -460,30 +461,30 @@ func main() {
 	storage := NewStorage(db)
 	server := &Server{storage: storage}
 
-	// authors
-	http.HandleFunc("GET /authors", server.GetAuthors)
-	http.HandleFunc("POST /authors", server.CreateAuthor)
-	http.HandleFunc("GET /authors/{id}", server.GetAuthorByID)
-	http.HandleFunc("PUT /authors/{id}", server.UpdateAuthor)
-	http.HandleFunc("DELETE /authors/{id}", server.DeleteAuthor)
+	// author
+	http.HandleFunc("GET /author", server.GetAuthors)
+	http.HandleFunc("POST /author", server.CreateAuthor)
+	http.HandleFunc("GET /author/{id}", server.GetAuthorByID)
+	http.HandleFunc("PUT /author/{id}", server.UpdateAuthor)
+	http.HandleFunc("DELETE /author/{id}", server.DeleteAuthor)
 
-	// readers
-	http.HandleFunc("GET /readers", server.GetReaders)
-	http.HandleFunc("POST /readers", server.CreateReader)
-	http.HandleFunc("GET /readers/{id}", server.GetReaderByID)
-	http.HandleFunc("PUT /readers/{id}", server.UpdateReader)
-	http.HandleFunc("DELETE /readers/{id}", server.DeleteReader)
+	// reader
+	http.HandleFunc("GET /reader", server.GetReaders)
+	http.HandleFunc("POST /reader", server.CreateReader)
+	http.HandleFunc("GET /reader/{id}", server.GetReaderByID)
+	http.HandleFunc("PUT /reader/{id}", server.UpdateReader)
+	http.HandleFunc("DELETE /reader/{id}", server.DeleteReader)
 
-	// books
-	http.HandleFunc("GET /books", server.GetBooks)
-	http.HandleFunc("POST /books", server.CreateBook)
-	http.HandleFunc("GET /books/{id}", server.GetBookByID)
-	http.HandleFunc("PUT /books/{id}", server.UpdateBook)
-	http.HandleFunc("DELETE /books/{id}", server.DeleteBook)
+	// book
+	http.HandleFunc("GET /book", server.GetBooks)
+	http.HandleFunc("POST /book", server.CreateBook)
+	http.HandleFunc("GET /book/{id}", server.GetBookByID)
+	http.HandleFunc("PUT /book/{id}", server.UpdateBook)
+	http.HandleFunc("DELETE /book/{id}", server.DeleteBook)
 
 	// functions
-	http.HandleFunc("POST /books/{id}/borrow", server.BorrowBook)
-	http.HandleFunc("POST /books/{id}/return", server.ReturnBook)
+	http.HandleFunc("POST /book/borrow", server.BorrowBook)
+	http.HandleFunc("POST /book/return", server.ReturnBook)
 
 	log.Println("Server starting on :8088")
 	log.Fatal(http.ListenAndServe(":8088", nil))
@@ -805,25 +806,22 @@ func (s *Server) DeleteBook(w http.ResponseWriter, r *http.Request) {
 // ========== БИЗНЕС-ОПЕРАЦИИ ==========
 
 func (s *Server) BorrowBook(w http.ResponseWriter, r *http.Request) {
-	bookID, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid book ID")
-		return
-	}
-
 	var req struct {
+		BookID   int `json:"book_id"`
 		ReaderID int `json:"reader_id"`
 	}
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if req.ReaderID == 0 {
-		s.writeError(w, http.StatusBadRequest, "reader_id is required")
+
+	if req.BookID == 0 || req.ReaderID == 0 {
+		s.writeError(w, http.StatusBadRequest, "book_id and reader_id are required")
 		return
 	}
 
-	if err := s.storage.BorrowBook(bookID, req.ReaderID); err != nil {
+	if err := s.storage.BorrowBook(req.BookID, req.ReaderID); err != nil {
 		switch e := err.(type) {
 		case *ForeignKeyError:
 			s.writeError(w, http.StatusNotFound, e.Message)
@@ -835,18 +833,26 @@ func (s *Server) BorrowBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	book, _ := s.storage.GetBookByID(bookID)
+	book, _ := s.storage.GetBookByID(req.BookID)
 	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
 }
 
 func (s *Server) ReturnBook(w http.ResponseWriter, r *http.Request) {
-	bookID, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid book ID")
+	var req struct {
+		BookID int `json:"book_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
-	if err := s.storage.ReturnBook(bookID); err != nil {
+	if req.BookID == 0 {
+		s.writeError(w, http.StatusBadRequest, "book_id is required")
+		return
+	}
+
+	if err := s.storage.ReturnBook(req.BookID); err != nil {
 		switch e := err.(type) {
 		case *ForeignKeyError:
 			s.writeError(w, http.StatusNotFound, e.Message)
@@ -858,7 +864,7 @@ func (s *Server) ReturnBook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	book, _ := s.storage.GetBookByID(bookID)
+	book, _ := s.storage.GetBookByID(req.BookID)
 	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
 }
 
