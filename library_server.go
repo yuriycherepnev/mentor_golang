@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// ========== МОДЕЛИ ==========
+// ========== MODELS ==========
 
 type Author struct {
 	ID   int    `json:"id"`
@@ -32,7 +32,7 @@ type Book struct {
 	Reader   *Reader `json:"reader,omitempty"` // для JOIN
 }
 
-// ========== ХРАНИЛИЩЕ ==========
+// ========== STORAGE ==========
 
 type Storage struct {
 	db *sql.DB
@@ -42,7 +42,7 @@ func NewStorage(db *sql.DB) *Storage {
 	return &Storage{db: db}
 }
 
-// ---------- AUTHORS ----------
+// ---------- AUTHOR ----------
 
 func (s *Storage) CreateAuthor(name string) (*Author, error) {
 	result, err := s.db.Exec("INSERT INTO author(name) VALUES(?)", name)
@@ -113,7 +113,7 @@ func (s *Storage) DeleteAuthor(id int) error {
 	return nil
 }
 
-// ---------- READERS ----------
+// ---------- READER ----------
 
 func (s *Storage) CreateReader(name string) (*Reader, error) {
 	result, err := s.db.Exec("INSERT INTO reader(name) VALUES(?)", name)
@@ -184,11 +184,12 @@ func (s *Storage) DeleteReader(id int) error {
 	return nil
 }
 
-// ---------- BOOKS ----------
-func (s *Storage) CreateBook(uniqueID string, title *string, idAuthor *int) (*Book, error) {
+// ---------- BOOK ----------
+
+func (s *Storage) CreateBook(title *string, idAuthor *int) (*Book, error) {
 	result, err := s.db.Exec(
-		"INSERT INTO book(unique_id, title, id_author, id_reader) VALUES(?, ?, ?, NULL)",
-		uniqueID, title, idAuthor,
+		"INSERT INTO book(title, id_author, id_reader) VALUES(?, ?, NULL)",
+		title, idAuthor,
 	)
 	if err != nil {
 		return nil, err
@@ -199,7 +200,7 @@ func (s *Storage) CreateBook(uniqueID string, title *string, idAuthor *int) (*Bo
 
 func (s *Storage) GetBooks() ([]Book, error) {
 	query := `
-        SELECT b.id, b.unique_id, b.title, b.id_author, b.id_reader,
+        SELECT b.id, b.title, b.id_author, b.id_reader,
                a.id, a.name,
                r.id, r.name
         FROM book b
@@ -245,7 +246,7 @@ func (s *Storage) GetBooks() ([]Book, error) {
 
 func (s *Storage) GetBookByID(id int) (*Book, error) {
 	query := `
-        SELECT b.id, b.unique_id, b.title, b.id_author, b.id_reader,
+        SELECT b.id, b.title, b.id_author, b.id_reader,
                a.id, a.name,
                r.id, r.name
         FROM book b
@@ -260,44 +261,6 @@ func (s *Storage) GetBookByID(id int) (*Book, error) {
 	var rNameStr sql.NullString
 
 	err := s.db.QueryRow(query, id).Scan(
-		&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
-		&aID, &aNameStr,
-		&rID, &rNameStr,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if aID.Valid {
-		b.Author = &Author{ID: int(aID.Int64), Name: aNameStr.String}
-	}
-	if rID.Valid {
-		b.Reader = &Reader{ID: int(rID.Int64), Name: rNameStr.String}
-	}
-
-	return &b, nil
-}
-
-func (s *Storage) GetBookByUniqueID(uniqueID string) (*Book, error) {
-	query := `
-        SELECT b.id, b.unique_id, b.title, b.id_author, b.id_reader,
-               a.id, a.name,
-               r.id, r.name
-        FROM book b
-        LEFT JOIN author a ON b.id_author = a.id
-        LEFT JOIN reader r ON b.id_reader = r.id
-        WHERE b.unique_id = ?
-    `
-	var b Book
-	var aID, _ sql.NullInt64
-	var aNameStr sql.NullString
-	var rID, _ sql.NullInt64
-	var rNameStr sql.NullString
-
-	err := s.db.QueryRow(query, uniqueID).Scan(
 		&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
 		&aID, &aNameStr,
 		&rID, &rNameStr,
@@ -490,7 +453,7 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8088", nil))
 }
 
-// ========== ХЕНДЛЕРЫ АВТОРОВ ==========
+// ========== AUTHOR HANDLERS ==========
 
 func (s *Server) GetAuthors(w http.ResponseWriter, r *http.Request) {
 	authors, err := s.storage.GetAuthors()
@@ -591,7 +554,7 @@ func (s *Server) DeleteAuthor(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
 }
 
-// ========== ХЕНДЛЕРЫ ЧИТАТЕЛЕЙ ==========
+// ========== READER HANDLERS ==========
 
 func (s *Server) GetReaders(w http.ResponseWriter, r *http.Request) {
 	readers, err := s.storage.GetReaders()
@@ -696,7 +659,7 @@ func (s *Server) DeleteReader(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
 }
 
-// ========== ХЕНДЛЕРЫ КНИГ ==========
+// ========== BOOK HANDLERS ==========
 
 func (s *Server) GetBooks(w http.ResponseWriter, r *http.Request) {
 	books, err := s.storage.GetBooks()
@@ -709,7 +672,6 @@ func (s *Server) GetBooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) CreateBook(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		UniqueID string  `json:"unique_id"`
 		Title    *string `json:"title,omitempty"`
 		IDAuthor *int    `json:"id_author,omitempty"`
 	}
@@ -717,19 +679,8 @@ func (s *Server) CreateBook(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if req.UniqueID == "" {
-		s.writeError(w, http.StatusBadRequest, "unique_id is required")
-		return
-	}
 
-	// Проверяем уникальность unique_id
-	existing, _ := s.storage.GetBookByUniqueID(req.UniqueID)
-	if existing != nil {
-		s.writeError(w, http.StatusConflict, "unique_id already exists")
-		return
-	}
-
-	book, err := s.storage.CreateBook(req.UniqueID, req.Title, req.IDAuthor)
+	book, err := s.storage.CreateBook(req.Title, req.IDAuthor)
 	if err != nil {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -803,7 +754,7 @@ func (s *Server) DeleteBook(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
 }
 
-// ========== БИЗНЕС-ОПЕРАЦИИ ==========
+// ========== BUSINESS LOGIC ==========
 
 func (s *Server) BorrowBook(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -868,7 +819,7 @@ func (s *Server) ReturnBook(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
 }
 
-// ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
+// ========== ADDITION FUNCTIONS ==========
 
 func extractID(r *http.Request) (int, error) {
 	path := strings.TrimSuffix(r.URL.Path, "/")
