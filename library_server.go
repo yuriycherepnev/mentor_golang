@@ -42,78 +42,9 @@ func NewStorage(db *sql.DB) *Storage {
 	return &Storage{db: db}
 }
 
-// ---------- AUTHOR ----------
+// ---------- AUTHOR STORAGE ----------
 
-func (s *Storage) CreateAuthor(name string) (*Author, error) {
-	result, err := s.db.Exec("INSERT INTO author(name) VALUES(?)", name)
-	if err != nil {
-		return nil, err
-	}
-	id, _ := result.LastInsertId()
-	return &Author{ID: int(id), Name: name}, nil
-}
-
-func (s *Storage) GetAuthors() ([]Author, error) {
-	rows, err := s.db.Query("SELECT id, name FROM author ORDER BY id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var authors []Author
-	for rows.Next() {
-		var a Author
-		if err := rows.Scan(&a.ID, &a.Name); err != nil {
-			return nil, err
-		}
-		authors = append(authors, a)
-	}
-	return authors, nil
-}
-
-func (s *Storage) GetAuthorByID(id int) (*Author, error) {
-	var a Author
-	err := s.db.QueryRow("SELECT id, name FROM author WHERE id = ?", id).Scan(&a.ID, &a.Name)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &a, nil
-}
-
-func (s *Storage) UpdateAuthor(id int, name string) error {
-	result, err := s.db.Exec("UPDATE author SET name = ? WHERE id = ?", name, id)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-func (s *Storage) DeleteAuthor(id int) error {
-	var count int
-	s.db.QueryRow("SELECT COUNT(*) FROM book WHERE id_author = ?", id).Scan(&count)
-	if count > 0 {
-		return &ForeignKeyError{"author has books"}
-	}
-
-	result, err := s.db.Exec("DELETE FROM author WHERE id = ?", id)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-// ---------- READER ----------
+// ---------- READER STORAGE ----------
 
 func (s *Storage) CreateReader(name string) (*Reader, error) {
 	result, err := s.db.Exec("INSERT INTO reader(name) VALUES(?)", name)
@@ -184,7 +115,7 @@ func (s *Storage) DeleteReader(id int) error {
 	return nil
 }
 
-// ---------- BOOK ----------
+// ---------- BOOK STORAGE ----------
 
 func (s *Storage) CreateBook(title *string, idAuthor *int) (*Book, error) {
 	result, err := s.db.Exec(
@@ -454,105 +385,6 @@ func main() {
 }
 
 // ========== AUTHOR HANDLERS ==========
-
-func (s *Server) GetAuthors(w http.ResponseWriter, r *http.Request) {
-	authors, err := s.storage.GetAuthors()
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: authors})
-}
-
-func (s *Server) CreateAuthor(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	if req.Name == "" {
-		s.writeError(w, http.StatusBadRequest, "Name is required")
-		return
-	}
-
-	author, err := s.storage.CreateAuthor(req.Name)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.writeJSON(w, http.StatusCreated, Response{Success: true, Data: author})
-}
-
-func (s *Server) GetAuthorByID(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	author, err := s.storage.GetAuthorByID(id)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if author == nil {
-		s.writeError(w, http.StatusNotFound, "Author not found")
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: author})
-}
-
-func (s *Server) UpdateAuthor(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	if req.Name == "" {
-		s.writeError(w, http.StatusBadRequest, "Name is required")
-		return
-	}
-
-	if err := s.storage.UpdateAuthor(id, req.Name); err != nil {
-		if err == sql.ErrNoRows {
-			s.writeError(w, http.StatusNotFound, "Author not found")
-		} else {
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "updated"}})
-}
-
-func (s *Server) DeleteAuthor(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	if err := s.storage.DeleteAuthor(id); err != nil {
-		var e *ForeignKeyError
-		switch {
-		case errors.As(err, &e):
-			s.writeError(w, http.StatusConflict, e.Message)
-		default:
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
-}
 
 // ========== READER HANDLERS ==========
 
