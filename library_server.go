@@ -117,199 +117,6 @@ func (s *Storage) DeleteReader(id int) error {
 
 // ---------- BOOK STORAGE ----------
 
-func (s *Storage) CreateBook(title *string, idAuthor *int) (*Book, error) {
-	result, err := s.db.Exec(
-		"INSERT INTO book(title, id_author, id_reader) VALUES(?, ?, NULL)",
-		title, idAuthor,
-	)
-	if err != nil {
-		return nil, err
-	}
-	id, _ := result.LastInsertId()
-	return s.GetBookByID(int(id))
-}
-
-func (s *Storage) GetBooks() ([]Book, error) {
-	query := `
-        SELECT b.id, b.title, b.id_author, b.id_reader,
-               a.id, a.name,
-               r.id, r.name
-        FROM book b
-        LEFT JOIN author a ON b.id_author = a.id
-        LEFT JOIN reader r ON b.id_reader = r.id
-        ORDER BY b.id
-    `
-	rows, err := s.db.Query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var books []Book
-	for rows.Next() {
-		var b Book
-		var aID, _ sql.NullInt64
-		var aNameStr sql.NullString
-		var rID, _ sql.NullInt64
-		var rNameStr sql.NullString
-
-		err := rows.Scan(
-			&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
-			&aID, &aNameStr,
-			&rID, &rNameStr,
-		)
-		if err != nil {
-			return nil, err
-		}
-
-		if aID.Valid {
-			b.Author = &Author{ID: int(aID.Int64), Name: aNameStr.String}
-		}
-
-		if rID.Valid {
-			b.Reader = &Reader{ID: int(rID.Int64), Name: rNameStr.String}
-		}
-
-		books = append(books, b)
-	}
-	return books, nil
-}
-
-func (s *Storage) GetBookByID(id int) (*Book, error) {
-	query := `
-        SELECT b.id, b.title, b.id_author, b.id_reader,
-               a.id, a.name,
-               r.id, r.name
-        FROM book b
-        LEFT JOIN author a ON b.id_author = a.id
-        LEFT JOIN reader r ON b.id_reader = r.id
-        WHERE b.id = ?
-    `
-	var b Book
-	var aID, _ sql.NullInt64
-	var aNameStr sql.NullString
-	var rID, _ sql.NullInt64
-	var rNameStr sql.NullString
-
-	err := s.db.QueryRow(query, id).Scan(
-		&b.ID, &b.Title, &b.IDAuthor, &b.IDReader,
-		&aID, &aNameStr,
-		&rID, &rNameStr,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if aID.Valid {
-		b.Author = &Author{ID: int(aID.Int64), Name: aNameStr.String}
-	}
-	if rID.Valid {
-		b.Reader = &Reader{ID: int(rID.Int64), Name: rNameStr.String}
-	}
-
-	return &b, nil
-}
-
-func (s *Storage) UpdateBook(id int, title *string, idAuthor *int) error {
-	var query string
-	var args []interface{}
-
-	if title != nil && idAuthor != nil {
-		query = "UPDATE book SET title = ?, id_author = ? WHERE id = ?"
-		args = []interface{}{title, idAuthor, id}
-	} else if title != nil {
-		query = "UPDATE book SET title = ? WHERE id = ?"
-		args = []interface{}{title, id}
-	} else if idAuthor != nil {
-		query = "UPDATE book SET id_author = ? WHERE id = ?"
-		args = []interface{}{idAuthor, id}
-	} else {
-		return nil
-	}
-
-	result, err := s.db.Exec(query, args...)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-func (s *Storage) DeleteBook(id int) error {
-	result, err := s.db.Exec("DELETE FROM book WHERE id = ?", id)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-// ---------- БИЗНЕС-ОПЕРАЦИИ ----------
-func (s *Storage) BorrowBook(bookID int, readerID int) error {
-	var readerExists bool
-	s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM reader WHERE id = ?)", readerID).Scan(&readerExists)
-	if !readerExists {
-		return &ForeignKeyError{"reader not found"}
-	}
-
-	var currentReader sql.NullInt64
-	err := s.db.QueryRow("SELECT id_reader FROM book WHERE id = ?", bookID).Scan(&currentReader)
-	if err == sql.ErrNoRows {
-		return &ForeignKeyError{"book not found"}
-	}
-	if err != nil {
-		return err
-	}
-
-	if currentReader.Valid {
-		return &BusinessError{"book already borrowed"}
-	}
-
-	result, err := s.db.Exec("UPDATE book SET id_reader = ? WHERE id = ?", readerID, bookID)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-func (s *Storage) ReturnBook(bookID int) error {
-	var currentReader sql.NullInt64
-	err := s.db.QueryRow("SELECT id_reader FROM book WHERE id = ?", bookID).Scan(&currentReader)
-	if err == sql.ErrNoRows {
-		return &ForeignKeyError{"book not found"}
-	}
-	if err != nil {
-		return err
-	}
-
-	if !currentReader.Valid {
-		return &BusinessError{"book is not borrowed"}
-	}
-
-	result, err := s.db.Exec("UPDATE book SET id_reader = NULL WHERE id = ?", bookID)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
 // ========== ОШИБКИ ==========
 
 type ForeignKeyError struct {
@@ -493,100 +300,63 @@ func (s *Server) DeleteReader(w http.ResponseWriter, r *http.Request) {
 
 // ========== BOOK HANDLERS ==========
 
-func (s *Server) GetBooks(w http.ResponseWriter, r *http.Request) {
-	books, err := s.storage.GetBooks()
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: books})
-}
-
-func (s *Server) CreateBook(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Title    *string `json:"title,omitempty"`
-		IDAuthor *int    `json:"id_author,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	book, err := s.storage.CreateBook(req.Title, req.IDAuthor)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.writeJSON(w, http.StatusCreated, Response{Success: true, Data: book})
-}
-
-func (s *Server) GetBookByID(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	book, err := s.storage.GetBookByID(id)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if book == nil {
-		s.writeError(w, http.StatusNotFound, "Book not found")
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
-}
-
-func (s *Server) UpdateBook(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	var req struct {
-		Title    *string `json:"title,omitempty"`
-		IDAuthor *int    `json:"id_author,omitempty"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-
-	if err := s.storage.UpdateBook(id, req.Title, req.IDAuthor); err != nil {
-		if err == sql.ErrNoRows {
-			s.writeError(w, http.StatusNotFound, "Book not found")
-		} else {
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-
-	book, _ := s.storage.GetBookByID(id)
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: book})
-}
-
-func (s *Server) DeleteBook(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	if err := s.storage.DeleteBook(id); err != nil {
-		if err == sql.ErrNoRows {
-			s.writeError(w, http.StatusNotFound, "Book not found")
-		} else {
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
-}
-
 // ========== BUSINESS LOGIC ==========
+
+func (s *Storage) BorrowBook(bookID int, readerID int) error {
+	var readerExists bool
+	s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM reader WHERE id = ?)", readerID).Scan(&readerExists)
+	if !readerExists {
+		return &ForeignKeyError{"reader not found"}
+	}
+
+	var currentReader sql.NullInt64
+	err := s.db.QueryRow("SELECT id_reader FROM book WHERE id = ?", bookID).Scan(&currentReader)
+	if err == sql.ErrNoRows {
+		return &ForeignKeyError{"book not found"}
+	}
+	if err != nil {
+		return err
+	}
+
+	if currentReader.Valid {
+		return &BusinessError{"book already borrowed"}
+	}
+
+	result, err := s.db.Exec("UPDATE book SET id_reader = ? WHERE id = ?", readerID, bookID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Storage) ReturnBook(bookID int) error {
+	var currentReader sql.NullInt64
+	err := s.db.QueryRow("SELECT id_reader FROM book WHERE id = ?", bookID).Scan(&currentReader)
+	if err == sql.ErrNoRows {
+		return &ForeignKeyError{"book not found"}
+	}
+	if err != nil {
+		return err
+	}
+
+	if !currentReader.Valid {
+		return &BusinessError{"book is not borrowed"}
+	}
+
+	result, err := s.db.Exec("UPDATE book SET id_reader = NULL WHERE id = ?", bookID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
 
 func (s *Server) BorrowBook(w http.ResponseWriter, r *http.Request) {
 	var req struct {
