@@ -3,12 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	_ "github.com/go-sql-driver/mysql"
 	"log"
 	"net/http"
-	"strconv"
-	"strings"
 )
 
 // ========== MODELS ==========
@@ -45,75 +42,6 @@ func NewStorage(db *sql.DB) *Storage {
 // ---------- AUTHOR STORAGE ----------
 
 // ---------- READER STORAGE ----------
-
-func (s *Storage) CreateReader(name string) (*Reader, error) {
-	result, err := s.db.Exec("INSERT INTO reader(name) VALUES(?)", name)
-	if err != nil {
-		return nil, err
-	}
-	id, _ := result.LastInsertId()
-	return &Reader{ID: int(id), Name: name}, nil
-}
-
-func (s *Storage) GetReaders() ([]Reader, error) {
-	rows, err := s.db.Query("SELECT id, name FROM reader ORDER BY id")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var readers []Reader
-	for rows.Next() {
-		var r Reader
-		if err := rows.Scan(&r.ID, &r.Name); err != nil {
-			return nil, err
-		}
-		readers = append(readers, r)
-	}
-	return readers, nil
-}
-
-func (s *Storage) GetReaderByID(id int) (*Reader, error) {
-	var r Reader
-	err := s.db.QueryRow("SELECT id, name FROM reader WHERE id = ?", id).Scan(&r.ID, &r.Name)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &r, nil
-}
-
-func (s *Storage) UpdateReader(id int, name string) error {
-	result, err := s.db.Exec("UPDATE reader SET name = ? WHERE id = ?", name, id)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-func (s *Storage) DeleteReader(id int) error {
-	var count int
-	s.db.QueryRow("SELECT COUNT(*) FROM book WHERE id_reader = ?", id).Scan(&count)
-	if count > 0 {
-		return &ForeignKeyError{"reader has books"}
-	}
-
-	result, err := s.db.Exec("DELETE FROM reader WHERE id = ?", id)
-	if err != nil {
-		return err
-	}
-	rows, _ := result.RowsAffected()
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
 
 // ---------- BOOK STORAGE ----------
 
@@ -194,109 +122,6 @@ func main() {
 // ========== AUTHOR HANDLERS ==========
 
 // ========== READER HANDLERS ==========
-
-func (s *Server) GetReaders(w http.ResponseWriter, r *http.Request) {
-	readers, err := s.storage.GetReaders()
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: readers})
-}
-
-func (s *Server) CreateReader(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	if req.Name == "" {
-		s.writeError(w, http.StatusBadRequest, "Name is required")
-		return
-	}
-
-	reader, err := s.storage.CreateReader(req.Name)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.writeJSON(w, http.StatusCreated, Response{Success: true, Data: reader})
-}
-
-func (s *Server) GetReaderByID(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	reader, err := s.storage.GetReaderByID(id)
-	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if reader == nil {
-		s.writeError(w, http.StatusNotFound, "Reader not found")
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: reader})
-}
-
-func (s *Server) UpdateReader(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid request body")
-		return
-	}
-	if req.Name == "" {
-		s.writeError(w, http.StatusBadRequest, "Name is required")
-		return
-	}
-
-	if err := s.storage.UpdateReader(id, req.Name); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			s.writeError(w, http.StatusNotFound, "Reader not found")
-		} else {
-			s.writeError(w, http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "updated"}})
-}
-
-func (s *Server) DeleteReader(w http.ResponseWriter, r *http.Request) {
-	id, err := extractID(r)
-	if err != nil {
-		s.writeError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	if err := s.storage.DeleteReader(id); err != nil {
-		var e *ForeignKeyError
-		switch {
-		case errors.As(err, &e):
-			s.writeError(w, http.StatusConflict, e.Message)
-		default:
-			if errors.Is(err, sql.ErrNoRows) {
-				s.writeError(w, http.StatusNotFound, "Reader not found")
-			} else {
-				s.writeError(w, http.StatusInternalServerError, err.Error())
-			}
-		}
-		return
-	}
-	s.writeJSON(w, http.StatusOK, Response{Success: true, Data: map[string]string{"message": "deleted"}})
-}
 
 // ========== BOOK HANDLERS ==========
 
@@ -422,22 +247,3 @@ func (s *Server) ReturnBook(w http.ResponseWriter, r *http.Request) {
 }
 
 // ========== ADDITION FUNCTIONS ==========
-
-func extractID(r *http.Request) (int, error) {
-	path := strings.TrimSuffix(r.URL.Path, "/")
-	parts := strings.Split(path, "/")
-	if len(parts) < 3 {
-		return 0, http.ErrNoLocation
-	}
-	return strconv.Atoi(parts[len(parts)-1])
-}
-
-func (s *Server) writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
-}
-
-func (s *Server) writeError(w http.ResponseWriter, status int, message string) {
-	s.writeJSON(w, status, Response{Success: false, Error: message})
-}
